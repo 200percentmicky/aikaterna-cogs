@@ -1,3 +1,5 @@
+⚠ This fork contains some cosmetic changes as well as using new features present in Discord.py 1.6 or above. Please use the original repo for your bot. Do not make PRs or open issues for this fork.
+
 # aikaterna-cogs
 v3 Cogs for Red-DiscordBot by Twentysix26.
 
