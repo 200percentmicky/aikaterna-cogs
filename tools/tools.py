@@ -213,6 +213,7 @@ class Tools(commands.Cog):
             discord.TextChannel: "Text Channel",
             discord.VoiceChannel: "Voice Channel",
             discord.CategoryChannel: "Category",
+            discord.StageChannel: "Stage Channel"
         }
 
         load = "```\nLoading channel info...```"
@@ -236,6 +237,8 @@ class Tools(commands.Cog):
             data += "[Users]:      {}\n".format(len(channel.members))
             data += "[User limit]: {}\n".format(channel.user_limit)
             data += "[Bitrate]:    {}kbps\n".format(int(channel.bitrate / 1000))
+        if ininstance(channel, discord.StageChannel):
+            data += "[Requesting to Speak]: {} members\n".format(len(channel.requesting_to_speak))
         data += "```"
         await asyncio.sleep(1)
         await waiting.edit(content=data)
