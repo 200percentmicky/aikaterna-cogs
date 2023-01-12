@@ -1,6 +1,6 @@
 import asyncio
 import aiohttp
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning
 import copy
 import datetime
 import discord
@@ -10,6 +10,7 @@ import io
 import logging
 import re
 import time
+import warnings
 from typing import Optional
 from types import MappingProxyType, SimpleNamespace
 from urllib.parse import urlparse
@@ -25,7 +26,24 @@ from .tag_type import INTERNAL_TAGS, VALID_IMAGES, TagType
 log = logging.getLogger("red.aikaterna.rss")
 
 
-__version__ = "1.4.5"
+IPV4_RE = re.compile("\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}")
+IPV6_RE = re.compile("([a-f0-9:]+:+)+[a-f0-9]+")
+
+
+__version__ = "1.8.3"
+
+warnings.filterwarnings(
+    "ignore",
+    category=DeprecationWarning,
+    # Ignore the warning in feedparser module *and* our module to account for the unreleased fix of this warning:
+    # https://github.com/kurtmckee/feedparser/pull/278
+    module=r"^(feedparser|rss)(\..+)?$",
+    message=(
+        "To avoid breaking existing software while fixing issue 310, a temporary mapping has been created from"
+        " `updated_parsed` to `published_parsed` if `updated_parsed` doesn't exist"
+    )
+)
+warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
 
 
 class RSS(commands.Cog):
@@ -43,7 +61,11 @@ class RSS(commands.Cog):
 
         self._read_feeds_loop = None
 
-        self._headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:83.0) Gecko/20100101 Firefox/83.0'}
+        self._headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:83.0) Gecko/20100101 Firefox/83.0"}
+
+    async def red_delete_data_for_user(self, **kwargs):
+        """Nothing to delete"""
+        return
 
     def initialize(self):
         self._read_feeds_loop = self.bot.loop.create_task(self.read_feeds())
@@ -123,6 +145,7 @@ class RSS(commands.Cog):
         """Append bs4-discovered tags to an rss_feed/feedparser object."""
         rss_object["is_special"] = []
         soup = None
+        tags_list = []
 
         temp_rss_obect = copy.deepcopy(rss_object)
         for tag_name, tag_content in temp_rss_obect.items():
@@ -156,7 +179,6 @@ class RSS(commands.Cog):
                     rss_object[f"{tag_name}_plaintext"] = self._add_generic_html_plaintext(soup)
 
             if tag_content_check == TagType.LIST:
-                tags_list = []
                 tags_content_counter = 0
 
                 for list_item in tag_content:
@@ -185,6 +207,7 @@ class RSS(commands.Cog):
 
                     if list_item_check == TagType.DICT:
                         authors_content_counter = 0
+                        enclosure_content_counter = 0
 
                         # common "authors" tag format
                         try:
@@ -196,6 +219,22 @@ class RSS(commands.Cog):
                         except KeyError:
                             pass
 
+                        # common "enclosure" tag image format
+                        # note: this is not adhering to RSS feed specifications
+                        # proper enclosure tags should have `length`, `type`, `url`
+                        # and not `href`, `type`, `rel`
+                        # but, this is written for the first feed I have seen with an "enclosure" tag
+                        try:
+                            image_url = list_item["href"]
+                            image_type = list_item["type"]
+                            image_rel = list_item["rel"]
+                            enclosure_content_counter += 1
+                            name = f"media_plaintext{str(enclosure_content_counter).zfill(2)}"
+                            rss_object[name] = image_url
+                            rss_object["is_special"].append(name)
+                        except KeyError:
+                            pass
+
                         # common "tags" tag format
                         try:
                             tag = list_item["term"]
@@ -203,15 +242,22 @@ class RSS(commands.Cog):
                             name = f"{tag_name}_plaintext{str(tags_content_counter).zfill(2)}"
                             rss_object[name] = tag
                             rss_object["is_special"].append(name)
-                            tags_list.append(tag)
+                            tags_list.append(tag) if tag not in tags_list else tags_list
                         except KeyError:
                             pass
 
-                    if len(tags_list) > 0:
-                        rss_object["tags_list"] = tags_list
-                        rss_object["tags_plaintext_list"] = humanize_list(tags_list)
-                        rss_object["is_special"].append("tags_list")
-                        rss_object["is_special"].append("tags_plaintext_list")
+                if len(tags_list) > 0:
+                    rss_object["tags_list"] = tags_list
+                    rss_object["tags_plaintext_list"] = humanize_list(tags_list)
+                    rss_object["is_special"].append("tags_list")
+                    rss_object["is_special"].append("tags_plaintext_list")
+
+        # if image dict tag exists, check for an image
+        try:
+            rss_object["image_plaintext"] = rss_object["image"]["href"]
+            rss_object["is_special"].append("image_plaintext")
+        except KeyError:
+            pass
 
         # if media_thumbnail or media_content exists, return the first friendly url
         try:
@@ -323,7 +369,7 @@ class RSS(commands.Cog):
         return None
 
     async def _get_feed_names(self, channel: discord.TextChannel):
-        """Helper for rss list."""
+        """Helper for rss list/listall."""
         feed_list = []
         space = "\N{SPACE}"
         all_feeds = await self.config.channel(channel).feeds.all()
@@ -380,6 +426,11 @@ class RSS(commands.Cog):
             msg = f"asyncio timeout while accessing feed at url:\n\t{url}"
             log.error(msg, exc_info=True)
             return None, friendly_msg
+        except aiohttp.client_exceptions.ServerDisconnectedError:
+            friendly_msg = "The target server disconnected early without a response."
+            msg = f"server disconnected while accessing feed at url:\n\t{url}"
+            log.error(msg, exc_info=True)
+            return None, friendly_msg
         except Exception:
             friendly_msg = "There was an unexpected error. Check your console for more information."
             msg = f"General failure accessing feed at url:\n\t{url}"
@@ -420,10 +471,20 @@ class RSS(commands.Cog):
         """
         entry_time = await self._time_tag_validation(feedparser_plus_obj)
 
+        # sometimes there's no title or no link attribute and feedparser doesn't really play nice with that
+        try:
+            feedparser_plus_obj_title = feedparser_plus_obj["title"]
+        except KeyError:
+            feedparser_plus_obj_title = ""
+        try:
+            feedparser_plus_obj_link = feedparser_plus_obj["link"]
+        except KeyError:
+            feedparser_plus_obj_link = ""
+
         rss_object = RssFeed(
             name=feed_name.lower(),
-            last_title=feedparser_plus_obj["title"],
-            last_link=feedparser_plus_obj["link"],
+            last_title=feedparser_plus_obj_title,
+            last_link=feedparser_plus_obj_link,
             last_time=entry_time,
             template="$title\n$link",
             url=url,
@@ -520,9 +581,12 @@ class RSS(commands.Cog):
 
                 rss = feedparser.parse(text)
                 if rss.bozo:
+                    error_message = rss.feed.get("summary", str(rss))[:1500]
+                    error_message = re.sub(IPV4_RE, "[REDACTED IP ADDRESS]", error_message)
+                    error_message = re.sub(IPV6_RE, "[REDACTED IP ADDRESS]", error_message)
                     msg = f"Bozo feed: feedparser is unable to parse the response from {url}.\n\n"
                     msg += "Received content preview:\n"
-                    msg += box(rss.feed.get("summary", str(rss))[:1500])
+                    msg += box(error_message)
                     raise NoFeedContent(msg)
                     return False
                 else:
@@ -582,7 +646,7 @@ class RSS(commands.Cog):
             except NoFeedContent as e:
                 await ctx.send(str(e))
                 return
-              
+
             if valid_url:
                 await self._add_feed(ctx, feed_name.lower(), channel, url)
             else:
@@ -594,7 +658,9 @@ class RSS(commands.Cog):
         pass
 
     @_rss_embed.command(name="color", aliases=["colour"])
-    async def _rss_embed_color(self, ctx, feed_name: str, channel: Optional[discord.TextChannel] = None, *, color: str = None):
+    async def _rss_embed_color(
+        self, ctx, feed_name: str, channel: Optional[discord.TextChannel] = None, *, color: str = None
+    ):
         """
         Set an embed color for a feed.
 
@@ -650,7 +716,9 @@ class RSS(commands.Cog):
         await ctx.send(f"Embed color for {bold(feed_name)} set to {user_facing_hex} ({color_name}).")
 
     @_rss_embed.command(name="image")
-    async def _rss_embed_image(self, ctx, feed_name: str, channel: Optional[discord.TextChannel] = None, image_tag_name: str = None):
+    async def _rss_embed_image(
+        self, ctx, feed_name: str, channel: Optional[discord.TextChannel] = None, image_tag_name: str = None
+    ):
         """
         Set a tag to be a large embed image.
 
@@ -682,7 +750,9 @@ class RSS(commands.Cog):
                 msg += "will be in tags named `$content_image02`, `$content_image03`, etc. Not every feed entry "
                 msg += "will have the same amount of scraped image tags. Images can also be found under tags named "
                 msg += "`$media_content_plaintext`, if present.\nExperiment with tags by setting them as your "
-                msg += f"template with `{ctx.prefix}rss template` and using `{ctx.prefix}rss force` to view the content."
+                msg += (
+                    f"template with `{ctx.prefix}rss template` and using `{ctx.prefix}rss force` to view the content."
+                )
                 await ctx.send(msg)
                 return
 
@@ -697,7 +767,9 @@ class RSS(commands.Cog):
             )
 
     @_rss_embed.command(name="thumbnail")
-    async def _rss_embed_thumbnail(self, ctx, feed_name: str, channel: Optional[discord.TextChannel] = None, thumbnail_tag_name: str = None):
+    async def _rss_embed_thumbnail(
+        self, ctx, feed_name: str, channel: Optional[discord.TextChannel] = None, thumbnail_tag_name: str = None
+    ):
         """
         Set a tag to be a thumbnail image.
 
@@ -729,7 +801,9 @@ class RSS(commands.Cog):
                 msg += "will be in tags named `$content_image02`, `$content_image03`, etc. Not every feed entry "
                 msg += "will have the same amount of scraped image tags. Images can also be found under tags named "
                 msg += "`$media_content_plaintext`, if present.\nExperiment with tags by setting them as your "
-                msg += f"template with `{ctx.prefix}rss template` and using `{ctx.prefix}rss force` to view the content."
+                msg += (
+                    f"template with `{ctx.prefix}rss template` and using `{ctx.prefix}rss force` to view the content."
+                )
                 await ctx.send(msg)
                 return
 
@@ -784,10 +858,21 @@ class RSS(commands.Cog):
                     await ctx.send("I can't reach that website.")
                     return
                 except aiohttp.client_exceptions.InvalidURL:
-                    await ctx.send("That seems to be an invalid URL. Use a full website URL like `https://www.site.com/`.")
+                    await ctx.send(
+                        "That seems to be an invalid URL. Use a full website URL like `https://www.site.com/`."
+                    )
+                    return
+                except aiohttp.client_exceptions.ServerDisconnectedError:
+                    await ctx.send("The server disconnected early without a response.")
                     return
                 except asyncio.exceptions.TimeoutError:
                     await ctx.send("The site didn't respond in time or there was no response.")
+                    return
+                except Exception as e:
+                    msg = "There was an issue trying to find a feed in that site. "
+                    msg += "Please check your console for more information."
+                    log.exception(e, exc_info=e)
+                    await ctx.send(msg)
                     return
 
         if "403 Forbidden" in soup.get_text():
@@ -811,7 +896,7 @@ class RSS(commands.Cog):
                     continue
                 if feed_url.startswith("//"):
                     final_url = f"{url_scheme}:{feed_url}"
-                elif ((not ls_feed_url.startswith(url_scheme)) and (not ls_feed_url.startswith(base_url))):
+                elif (not ls_feed_url.startswith(url_scheme)) and (not ls_feed_url.startswith(base_url)):
                     final_url = f"{url_scheme}://{base_url}/{ls_feed_url}"
                 elif ls_feed_url.startswith(base_url):
                     final_url = f"{url_scheme}://{base_url}"
@@ -847,7 +932,9 @@ class RSS(commands.Cog):
         await self.get_current_feed(channel, feed_name, rss_feed, force=True)
 
     @rss.command(name="limit")
-    async def _rss_limit(self, ctx, feed_name: str, channel: Optional[discord.TextChannel] = None, character_limit: int = None):
+    async def _rss_limit(
+        self, ctx, feed_name: str, channel: Optional[discord.TextChannel] = None, character_limit: int = None
+    ):
         """
         Set a character limit for feed posts. Use 0 for unlimited.
 
@@ -903,6 +990,27 @@ class RSS(commands.Cog):
         for page in pagify(msg, delims=["\n"], page_length=1800):
             await ctx.send(box(page, lang="ini"))
 
+    @rss.command(name="listall")
+    async def _rss_listall(self, ctx):
+        """List all saved feeds for this server."""
+        all_channels = await self.config.all_channels()
+        all_guild_channels = [x.id for x in ctx.guild.channels]
+        msg = ""
+        for channel_id, data in all_channels.items():
+            if channel_id in all_guild_channels:
+                channel_obj = ctx.guild.get_channel(channel_id)
+                feeds = await self._get_feed_names(channel_obj)
+                if not feeds:
+                    continue
+                if feeds == ["None."]:
+                    continue
+                msg += f"[ Available Feeds for #{channel_obj.name} ]\n\n\t"
+                msg += "\n\t".join(sorted(feeds))
+                msg += "\n\n"
+
+        for page in pagify(msg, delims=["\n\n", "\n"], page_length=1800):
+            await ctx.send(box(page, lang="ini"))
+
     @rss.command(name="listtags")
     async def _rss_list_tags(self, ctx, feed_name: str, channel: Optional[discord.TextChannel] = None):
         """List the tags available from a specific feed."""
@@ -954,7 +1062,8 @@ class RSS(commands.Cog):
         msg += "\n\n\t[X] = html | [\\] = dictionary | [-] = list | [ ] = plain text"
         msg += "\n\t[*] = specially-generated tag, may not be present in every post"
 
-        await ctx.send(box(msg, lang="ini"))
+        for msg_part in pagify(msg, delims=["\n\t", "\n\n"]):
+            await ctx.send(box(msg_part, lang="ini"))
 
     @checks.is_owner()
     @rss.group(name="parse")
@@ -1004,7 +1113,7 @@ class RSS(commands.Cog):
         if not override_list:
             msg = "No site overrides saved."
         else:
-            msg = "Active for:\n" + '\n'.join(override_list)
+            msg = "Active for:\n" + "\n".join(override_list)
         await ctx.send(box(msg))
 
     @_rss_parse.command(name="remove", aliases=["delete", "del"])
@@ -1105,7 +1214,9 @@ class RSS(commands.Cog):
         pass
 
     @_rss_tag.command(name="allow")
-    async def _rss_tag_allow(self, ctx, feed_name: str, channel: Optional[discord.TextChannel] = None, *, tag: str = None):
+    async def _rss_tag_allow(
+        self, ctx, feed_name: str, channel: Optional[discord.TextChannel] = None, *, tag: str = None
+    ):
         """
         Set an allowed tag for a feed to be posted. The tag must match exactly (without regard to title casing).
         No regex or placeholder qualification.
@@ -1121,12 +1232,16 @@ class RSS(commands.Cog):
         async with self.config.channel(channel).feeds() as feed_data:
             allowed_tags = feed_data[feed_name].get("allowed_tags", [])
             if tag.lower() in [x.lower() for x in allowed_tags]:
-                return await ctx.send(f"{bold(await self._title_case(tag))} is already in the allowed list for {bold(feed_name)}.")
+                return await ctx.send(
+                    f"{bold(await self._title_case(tag))} is already in the allowed list for {bold(feed_name)}."
+                )
             allowed_tags.append(tag.lower())
             feed_data[feed_name]["allowed_tags"] = allowed_tags
 
-        await ctx.send(f"{bold(await self._title_case(tag))} was added to the list of allowed tags for {bold(feed_name)}. "
-                        "If a feed post's `$tags` does not include this value, the feed will not post.")
+        await ctx.send(
+            f"{bold(await self._title_case(tag))} was added to the list of allowed tags for {bold(feed_name)}. "
+            "If a feed post's `$tags` does not include this value, the feed will not post."
+        )
 
     @_rss_tag.command(name="allowlist")
     async def _rss_tag_allowlist(self, ctx, feed_name: str, channel: Optional[discord.TextChannel] = None):
@@ -1150,7 +1265,9 @@ class RSS(commands.Cog):
         await ctx.send(box(msg, lang="ini"))
 
     @_rss_tag.command(name="remove", aliases=["delete"])
-    async def _rss_tag_remove(self, ctx, feed_name: str, channel: Optional[discord.TextChannel] = None, *, tag: str = None):
+    async def _rss_tag_remove(
+        self, ctx, feed_name: str, channel: Optional[discord.TextChannel] = None, *, tag: str = None
+    ):
         """
         Remove a tag from the allow list. The tag must match exactly (without regard to title casing).
         No regex or placeholder qualification.
@@ -1166,12 +1283,18 @@ class RSS(commands.Cog):
             try:
                 allowed_tags.remove(tag.lower())
                 feed_data[feed_name]["allowed_tags"] = allowed_tags
-                await ctx.send(f"{bold(await self._title_case(tag))} was removed from the list of allowed tags for {bold(feed_name)}.")
+                await ctx.send(
+                    f"{bold(await self._title_case(tag))} was removed from the list of allowed tags for {bold(feed_name)}."
+                )
             except ValueError:
-                await ctx.send(f"{bold(await self._title_case(tag))} was not found in the allow list for {bold(feed_name)}.")
+                await ctx.send(
+                    f"{bold(await self._title_case(tag))} was not found in the allow list for {bold(feed_name)}."
+                )
 
     @rss.command(name="template")
-    async def _rss_template(self, ctx, feed_name: str, channel: Optional[discord.TextChannel] = None, *, template: str = None):
+    async def _rss_template(
+        self, ctx, feed_name: str, channel: Optional[discord.TextChannel] = None, *, template: str = None
+    ):
         """
         Set a template for the feed alert.
 
@@ -1234,10 +1357,27 @@ class RSS(commands.Cog):
                 if last_time > entry_time:
                     log.debug("Not posting because new entry is older than last saved entry.")
                     return
-            await self._update_last_scraped(channel, name, sorted_feed_by_post_time[0].title, sorted_feed_by_post_time[0].link, entry_time)
+            try:
+                title = sorted_feed_by_post_time[0].title
+            except AttributeError:
+                title = ""
+            try:
+                link = sorted_feed_by_post_time[0].link
+            except AttributeError:
+                link = ""
+            await self._update_last_scraped(channel, name, title, link, entry_time)
 
         feedparser_plus_objects = []
         for entry in sorted_feed_by_post_time:
+            # sometimes there's no title or no link attribute and feedparser doesn't really play nice with that
+            try:
+                entry_title = entry.title
+            except AttributeError:
+                entry_title = ""
+            try:
+                entry_link = entry.link
+            except AttributeError:
+                entry_link = ""
 
             # find the updated_parsed (checked first) or an published_parsed tag if they are present
             entry_time = await self._time_tag_validation(entry)
@@ -1256,16 +1396,16 @@ class RSS(commands.Cog):
                 # this will only work for rss sites that are single-use like cloudflare status, discord status, etc
                 # where an update on the last post should be posted
                 # this can be overridden by a bot owner in the rss parse command, per problematic website
-                if (last_title == entry.title) and (last_link == entry.link) and (entry_time > last_time):
+                if (last_title == entry_title) and (last_link == entry_link) and (last_time < entry_time):
                     log.debug(f"New update found for an existing post in {name} on cid {channel.id}")
                     feedparser_plus_obj = await self._add_to_feedparser_object(entry, url)
                     feedparser_plus_objects.append(feedparser_plus_obj)
                 # regular feed qualification after this
-                if (last_title != entry.title) and (last_link != entry.link) and (last_time < entry_time):
-                    log.debug(f"New entry found via time validation for feed {name} on cid {channel.id}")
+                if (last_link != entry_link) and (last_time < entry_time):
+                    log.debug(f"New entry found via time and link validation for feed {name} on cid {channel.id}")
                     feedparser_plus_obj = await self._add_to_feedparser_object(entry, url)
                     feedparser_plus_objects.append(feedparser_plus_obj)
-                if (last_title == "" and entry.title == "") and (last_link != entry.link) and (last_time < entry_time):
+                if (last_title == "" and entry_title == "") and (last_link != entry_link) and (last_time < entry_time):
                     log.debug(f"New entry found via time validation for feed {name} on cid {channel.id} - no title")
                     feedparser_plus_obj = await self._add_to_feedparser_object(entry, url)
                     feedparser_plus_objects.append(feedparser_plus_obj)
@@ -1273,7 +1413,7 @@ class RSS(commands.Cog):
             # this is a post that has no time information attached to it and we can only
             # verify that the title and link did not match the previously posted entry
             elif (entry_time or last_time) is None:
-                if last_title == entry.title and last_link == entry.link:
+                if last_title == entry_title and last_link == entry_link:
                     log.debug(f"Breaking rss entry loop for {name} on {channel.id}, via link match")
                     break
                 else:
@@ -1307,6 +1447,8 @@ class RSS(commands.Cog):
         for feedparser_plus_obj in feedparser_plus_objects:
             try:
                 curr_title = feedparser_plus_obj.title
+            except AttributeError:
+                curr_title = ""
             except IndexError:
                 log.debug(f"No entries found for feed {name} on cid {channel.id}")
                 return
@@ -1318,7 +1460,9 @@ class RSS(commands.Cog):
                 feed_tag_list = [x.lower() for x in feedparser_plus_obj.get("tags_list", [])]
                 intersection = list(set(feed_tag_list).intersection(allowed_post_tags))
                 if len(intersection) == 0:
-                    log.debug(f"{name} feed post in {channel.name} ({channel.id}) was denied because of an allowed tag mismatch.")
+                    log.debug(
+                        f"{name} feed post in {channel.name} ({channel.id}) was denied because of an allowed tag mismatch."
+                    )
                     continue
 
             # starting to fill out the template for feeds that passed tag verification (if present)
@@ -1514,10 +1658,6 @@ class RSS(commands.Cog):
             for channel_id, channel_feed_list in config_data.items():
                 channel = await self._get_channel_object(channel_id)
                 if not channel:
-                    log.info(
-                        f"Response channel {channel_id} not found, forbidden to access, or no perms to send messages, removing channel from config"
-                    )
-                    await self.config.channel_from_id(int(channel_id)).clear()  # Remove entries from dead channel
                     continue
 
                 if await self.bot.cog_disabled_in_guild(self, channel.guild):
@@ -1547,6 +1687,6 @@ class RSS(commands.Cog):
 class NoFeedContent(Exception):
     def __init__(self, m):
         self.message = m
-    
+
     def __str__(self):
         return self.message

@@ -16,7 +16,7 @@ NEW8_CODE_RE = re.compile("^[0-9a-zA-Z]{8}$")
 FAILURE_MSG = "That invite doesn't seem to be valid."
 PERM_MSG = "I need the Administrator permission on this guild to view invite information."
 
-__version__ = "0.0.6"
+__version__ = "0.0.7"
 
 
 class Invites(commands.Cog):
@@ -27,6 +27,10 @@ class Invites(commands.Cog):
         default_guild = {"pinned_invites": []}
 
         self.config.register_guild(**default_guild)
+
+    async def red_delete_data_for_user(self, **kwargs):
+        """Nothing to delete"""
+        return
 
     @commands.guild_only()
     @commands.group()
@@ -68,6 +72,12 @@ class Invites(commands.Cog):
                 inv_object = await self._get_invite_from_code(ctx, invite_code_or_object)
             else:
                 inv_object = invite_code_or_object
+            if not inv_object:
+                # Someone deleted a pinned invite or it expired
+                pinned_invites = await self.config.guild(ctx.guild).pinned_invites()
+                pinned_invites.remove(invite_code_or_object)
+                await self.config.guild(ctx.guild).pinned_invites.set(pinned_invites)
+                continue
             max_uses = await self.get_invite_max_uses(ctx, inv_object)
             inv_details = f"{i+1}. {inv_object.url} [ {inv_object.uses} uses / {max_uses} max ]\n"
             invite_info += inv_details
