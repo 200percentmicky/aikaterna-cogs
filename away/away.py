@@ -177,39 +177,39 @@ class Away(commands.Cog):
         message = await self.find_user_mention(message)
 
         if state == "away":
-            msg = f"{author.display_name} is currently away"
+            msg = f"**{author}** is currently away"
         elif state == "idle":
-            msg = f"{author.display_name} is currently idle"
+            msg = f"**{author}** is currently idle"
         elif state == "dnd":
-            msg = f"{author.display_name} is currently do not disturb"
+            msg = f"**{author}** is currently do not disturb"
         elif state == "offline":
-            msg = f"{author.display_name} is currently offline"
+            msg = f"**{author}** is currently offline"
         elif state == "gaming":
-            msg = f"{author.display_name} is currently playing {author.activity.name}"
+            msg = f"**{author}** is currently playing {author.activity.name}"
         elif state == "gamingcustom":
             status = [c for c in author.activities if c.type == discord.ActivityType.playing]
-            msg = f"{author.display_name} is currently playing {status[0].name}"
+            msg = f"**{author}** is currently playing {status[0].name}"
         elif state == "listening":
             artist_title = f"{author.activity.title} by " + ", ".join(a for a in author.activity.artists)
             currently_playing = self._draw_play(author.activity)
-            msg = f"{author.display_name} is currently listening to {artist_title}\n{currently_playing}"
+            msg = f"**{author}** is currently listening to {artist_title}\n{currently_playing}"
         elif state == "listeningcustom":
             status = [c for c in author.activities if c.type == discord.ActivityType.listening]
             artist_title = f"{status[0].title} by " + ", ".join(a for a in status[0].artists)
             currently_playing = self._draw_play(status[0])
-            msg = f"{author.display_name} is currently listening to {artist_title}\n{currently_playing}"
+            msg = f"**{author}** is currently listening to {artist_title}\n{currently_playing}"
         elif state == "streaming":
-            msg = f"{author.display_name} is currently streaming at {author.activity.url}"
+            msg = f"**{author}** is currently streaming at {author.activity.url}"
         elif state == "streamingcustom":
             status = [c for c in author.activities if c.type == discord.ActivityType.streaming]
-            msg = f"{author.display_name} is currently streaming at {status[0].url}"
+            msg = f"**{author}** is currently streaming at {status[0].url}"
         else:
-            msg = f"{author.display_name} is currently away"
+            msg = f"**{author}** is currently away"
 
         if message != " " and state != "listeningcustom":
-            msg += f" and has set the following message: `{message}`"
+            msg += f" and has set the following message:\n{message}"
         elif message != " " and state == "listeningcustom":
-            msg += f"\n\nCustom message: `{message}`"
+            msg += f"\n\nCustom message:\n{message}"
 
         return msg
 
