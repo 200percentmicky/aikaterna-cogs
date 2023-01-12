@@ -237,7 +237,7 @@ class Tools(commands.Cog):
             data += "[Users]:      {}\n".format(len(channel.members))
             data += "[User limit]: {}\n".format(channel.user_limit)
             data += "[Bitrate]:    {}kbps\n".format(int(channel.bitrate / 1000))
-        if ininstance(channel, discord.StageChannel):
+        if isinstance(channel, discord.StageChannel):
             data += "[Requesting to Speak]: {} members\n".format(len(channel.requesting_to_speak))
         data += "```"
         await asyncio.sleep(1)
